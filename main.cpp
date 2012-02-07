@@ -18,7 +18,10 @@
 */
 
 #include <iostream>
+#include <fstream>
+#include <string>
 #include <string.h>
+#include <vector>
 #include <errno.h>
 #include <sys/types.h>
        #include <sys/stat.h>
@@ -51,7 +54,9 @@ void copy(
 	std::string folder,
 	std::string base,
 	Camera *camera,
-	GPContext * context
+	GPContext * context,
+	std::vector<std::string> const & seen, std::string const & where,
+	std::fstream & record
 )
 {
 	std::string const dir = folder.empty() ? "/" : folder + (folder.size() > 1 ? "/" : "") + base;
@@ -68,15 +73,31 @@ void copy(
 			std::string lower(name + 3);
 			std::transform(lower.begin(), lower.end(), lower.begin(), tolower);
 			std::string src = dir + "/" + name;
-			std::string dest = "/disks/shared/junk/" + base.substr(0, 3) + lower;
-			std::cout << src << " -> " << dest << std::endl;
+			std::string new_base = base.substr(0, 3) + lower;
+			if (binary_search(seen.begin(), seen.end(), new_base))
+			{
+				//std::cout << "already seen " << new_base << std::endl;
+			}
+			else
+			{
+				std::string dest = where + "/" + new_base;
+				std::string tmp = dest + ".tmp";
+				std::cout << src << " -> " << dest << std::endl;
 
-			int fd;
-			sys(fd = open(dest.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666));
-			CameraFile * file;
-			check(gp_file_new_from_fd(&file, fd));
-			check(gp_camera_file_get(camera, dir.c_str(), name, GP_FILE_TYPE_NORMAL, file, context));
-			check(gp_file_free(file));
+				int fd;
+				sys(fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666));
+				CameraFile * file;
+				check(gp_file_new_from_fd(&file, fd));
+				check(gp_camera_file_get(camera, dir.c_str(), name, GP_FILE_TYPE_NORMAL, file, context));
+				sys(fsync(fd));
+				check(gp_file_free(file));
+				sys(rename(tmp.c_str(), dest.c_str()));
+				if (!(record << new_base << std::endl))
+				{
+					std::cerr << "failed to update record\n";
+					exit(1);
+				}
+			}
 		}
 	}
 	else
@@ -88,14 +109,51 @@ void copy(
 		{
 			char const * name;
 			check(gp_list_get_name(list, 0, &name));
-			copy(dir, name, camera, context);
+			copy(dir, name, camera, context, seen, where, record);
 		}
 	}
 	gp_list_free (list);
 }
 
+void
+get_read(std::vector<std::string> & seen, std::fstream & read)
+{
+	std::string already_read("/home/stuart/var/photos/seen");
+	std::string line;
+	//read.open(already_read.c_str(), std::ios::in | std::ios::out);
+	read.open(already_read.c_str(), std::ios::in | std::ios::out);
+	if (!read)
+	{
+		std::cerr << "failed to open " << already_read << ": " << strerror(errno) << std::endl;
+		exit(1);
+	}
+	while (getline(read, line))
+		seen.push_back(line);
+	if (read.bad())
+	{
+		std::cerr << "failed to read " << already_read << ": " << strerror(errno) << std::endl;
+		exit(1);
+	}
+	sort(seen.begin(), seen.end());
+	std::cout << "already read " << seen.size() << std::endl;
+	read.clear();
+	//copy(read, eof, std::back_inserter(seen));
+	read.seekp(0, std::ios::cur);
+	if (!(read << "\n"))
+	{
+		std::cerr << "cannot write " << already_read << ": " << strerror(errno) << std::endl;
+		exit(1);
+	}
+}
+
+
 main(int argc, char * argv[])
 {
+	std::string where = (argv[1] == 0) ? "." : argv[1];
+	std::fstream record;
+	std::vector<std::string> seen;
+	get_read(seen, record);
+
 	GPContext * context = sample_create_context ();
 	Camera *camera;
 	gp_camera_new (&camera);
@@ -114,16 +172,22 @@ main(int argc, char * argv[])
 		gp_camera_free (camera);
 		return 1;
 	}
-	std::cout << "Summary: " << text.text << std::endl; 
+	//std::cout << "Summary: " << text.text << std::endl; 
 
 	CameraList	*list;
 	check(gp_list_new (&list));
 
-	copy("", "", camera, context);
+	copy("", "", camera, context, seen, where, record);
 
 
 	gp_camera_exit (camera, context);
 	gp_camera_free (camera); 
+
+	if (!record)
+	{
+		std::cerr << "failed to update record\n";
+		exit(1);
+	}
 	std::cout << "done\n";
 	return 0;
 }
